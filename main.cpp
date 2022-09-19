@@ -10,85 +10,99 @@
 #include <TString.h>
 #include <TTree.h>
 
+#include <boost/program_options.hpp>
+#include <boost/program_options/options_description.hpp>
+#include <boost/program_options/parsers.hpp>
+#include <boost/program_options/positional_options.hpp>
+#include <boost/program_options/value_semantic.hpp>
+#include <boost/program_options/variables_map.hpp>
+#include <boost/range/detail/implementation_help.hpp>
+#include <complex>
+#include <cstdio>
+
 using std::string;
+using std::vector;
+namespace po = boost::program_options;
 
 #define LEN(x) (sizeof(x) / sizeof(x[0]))
 #define DIRICH_CHAN_COUNT 32
-#define TRIGGER_CHAN 994
 
-const unsigned int dirichStartChans[] = {1024, 1056};
+vector<unsigned int> dirichStartChans;
+unsigned int triggerChan;
 
-void writeToFile(string filename, TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
-                 double cuts[][DIRICH_CHAN_COUNT][2]) {
+void writeToTSVFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
+                    double cuts[][DIRICH_CHAN_COUNT][2], string filename) {
     FILE *file = fopen(filename.data(), "w");
     if (file == NULL) {
         fprintf(stderr, "\nerror: could not open file '%s'\n", filename.data());
     }
 
     fprintf(file,
-            "Channel\tToT Cut[ns]\tMean[ns]\tSigma[ps]\tSigma Error[ps]\n");
+            "Channel\tToT Cut[ns]\t"
+            "Mean1[ns]\tSigma1[ps]\tSigmaErr1[ps]\t"
+            "Mean2[ns]\tSigma2[ps]\tSigmaErr2[ps]\t"
+            "Mean3[ns]\tSigma3[ps]\tSigmaErr3[ps]\n");
 
-    for (unsigned int i = 0; i < LEN(dirichStartChans); i++) {
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < DIRICH_CHAN_COUNT; j++) {
-            int channel = dirichStartChans[i] + j;
-            auto fitResult = fitResults[i][j];
-            if (fitResult == -1) continue;
+            unsigned int chan = dirichStartChans[i] + j;
+            auto r = fitResults[i][j];
+            if (r == -1) continue;
 
-            fprintf(file, "%d\t%f\t%f\t%f\t%f\n", channel, cuts[i][j][0],
-                    fitResult->Parameter(1), fitResult->Parameter(2) * 1e3,
-                    fitResult->ParError(2) * 1e3);
+            fprintf(file, "%d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n", chan,
+                    cuts[i][j][0], r->Parameter(1), r->Parameter(2) * 1e3,
+                    r->ParError(2) * 1e3, r->Parameter(4),
+                    r->Parameter(5) * 1e3, r->ParError(5) * 1e3,
+                    r->Parameter(7), r->Parameter(8) * 1e3,
+                    r->ParError(8) * 1e3);
         }
     }
 
     fclose(file);
 }
 
-void scanDiRICH(unsigned int dirichIndex, double *fLeadEdgeBase,
-                double *fTotBase, TH2D *hists[][DIRICH_CHAN_COUNT]) {
-    unsigned int startChan = dirichStartChans[dirichIndex];
-    double fLeadEdgeChan, fLeadEdgeTrigger, fTotChan;
+void writeToRootFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
+                     string outFile) {
+    const unsigned int arrSize = dirichStartChans.size() * LEN(fitResults[0]);
+    double sigmaErrs[3][arrSize], sigmas[3][arrSize], means[3][arrSize];
 
-    for (unsigned int i = 0; i < LEN(hists[0]); i++) {
-        int chan = startChan + i;
-        if (chan == TRIGGER_CHAN) continue;
+    auto outRootFile = new TFile(TString(outFile), "RECREATE");
+    auto dataTree = new TTree("D", "Computed data");
+    dataTree->Branch("sigmas", sigmas,
+                     TString::Format("sigmas[3][%d]/D", arrSize));
+    dataTree->Branch("means", means,
+                     TString::Format("means[3][%d]/D", arrSize));
 
-        fLeadEdgeChan = *(fLeadEdgeBase + chan);
-        fLeadEdgeTrigger = *(fLeadEdgeBase + TRIGGER_CHAN);
-        fTotChan = *(fTotBase + chan);
+    // Fill sigmas
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
+        for (unsigned int j = 0; j < LEN(fitResults[0]); j++) {
+            auto fitResult = fitResults[i][j];
+            unsigned int index = LEN(fitResults[0]) * i + j;
+            if (fitResult == -1) continue;
 
-        hists[dirichIndex][i]->Fill(fTotChan, fLeadEdgeChan - fLeadEdgeTrigger);
+            for (unsigned int j = 0; j < 3; j++) {
+                means[j][index] = fitResult->Parameter(3 * j + 1);
+                sigmas[j][index] = fitResult->Parameter(3 * j + 2) * 1e3;
+                sigmaErrs[j][index] = fitResult->ParError(3 * j + 2) * 1e3;
+            }
+        }
     }
+
+    // auto projHistList = new TList();
+    // for (unsigned int i = 0; i < LEN(hists); i++) {
+    //     for (unsigned int j = 0; j < LEN(hists[0]); j++) {
+    //         projHistList->Add(projHists[i][j]);
+    //     }
+    // }
+
+    dataTree->Fill();
+    dataTree->Write("D");
+    // projHistList->Write("histList", TObject::kSingleKey);
+    outRootFile->Close();
 }
 
-int main(int argc, const char **argv) {
-    if (argc != 2) {
-        printf("Usage:\n\tfits pulser_data.root\n");
-        return 1;
-    }
-
-    string ext = ".A.root";
-    string inputFilename = argv[1];
-    string inputStem =
-        inputFilename.substr(0, inputFilename.length() - ext.length());
-
-    // Disable buffering for STDOUT
-    setbuf(stdout, NULL);
-
-    // Disable referencing for histograms globally in favour of variables
-    // Note that all histogram classes extend TH1
-    TH1::AddDirectory(kFALSE);
-
-    printf("Loading data");
-    auto file = new TFile(inputFilename.data());
-    if (file == NULL) {
-        printf("error: could not open '%s'\n", inputFilename.data());
-        return 1;
-    }
-    printf(" ...done\n");
-
-    printf("Populating the 2D histogram");
-    TH2D *hists[LEN(dirichStartChans)][DIRICH_CHAN_COUNT];
-    for (unsigned int i = 0; i < LEN(hists); i++) {
+void fill2DHistograms(TFile *file, TH2D *hists[][DIRICH_CHAN_COUNT]) {
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < LEN(hists[0]); j++) {
             hists[i][j] = new TH2D("", "", 2000, 20, 50, 2000, 20, 60);
         }
@@ -102,23 +116,35 @@ int main(int argc, const char **argv) {
 
     double *leadEdgeBasePointer, *totBasePointer;
     long long nEntries = tree->GetEntriesFast();
-    for (long long i = 0; i < nEntries; i++) {
-        leadEdgeBranch->GetEntry(i);
-        totBranch->GetEntry(i);
+    for (long long k = 0; k < nEntries; k++) {
+        leadEdgeBranch->GetEntry(k);
+        totBranch->GetEntry(k);
         leadEdgeBasePointer = (double *)leadEdgeLeaf->GetValuePointer();
         totBasePointer = (double *)totLeaf->GetValuePointer();
 
-        for (unsigned int j = 0; j < LEN(dirichStartChans); j++) {
-            scanDiRICH(j, leadEdgeBasePointer, totBasePointer, hists);
+        for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
+            unsigned int startChan = dirichStartChans[i];
+            double fLeadEdgeChan, fLeadEdgeTrigger, fTotChan;
+
+            for (unsigned int j = 0; j < DIRICH_CHAN_COUNT; j++) {
+                unsigned int chan = startChan + j;
+                if (chan == triggerChan) continue;
+
+                fLeadEdgeChan = *(leadEdgeBasePointer + chan);
+                fLeadEdgeTrigger = *(leadEdgeBasePointer + triggerChan);
+                fTotChan = *(totBasePointer + chan);
+
+                hists[i][j]->Fill(fTotChan, fLeadEdgeChan - fLeadEdgeTrigger);
+            }
         }
     }
     delete tree;
-    printf(" ...done\n");
+}
 
-    printf("Finding the cuts");
-    double cuts[LEN(hists)][LEN(hists[0])][2];
-    int maxBins[LEN(hists)][LEN(hists[0])][2];
-    for (unsigned int i = 0; i < LEN(cuts); i++) {
+void findCuts(TH2D *hists[][DIRICH_CHAN_COUNT],
+              double cuts[][DIRICH_CHAN_COUNT][2],
+              int maxBins[][DIRICH_CHAN_COUNT][2]) {
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < LEN(cuts[0]); j++) {
             auto hist = hists[i][j];
 
@@ -134,11 +160,12 @@ int main(int argc, const char **argv) {
             maxBins[i][j][1] = binY;
         }
     }
-    printf(" ...done\n");
+}
 
-    printf("Making the cuts");
-    TH1D *projHists[LEN(hists)][LEN(hists[0])];
-    for (unsigned int i = 0; i < LEN(projHists); i++) {
+void cutHistograms(TH2D *hists[][DIRICH_CHAN_COUNT],
+                   TH1D *projHists[][DIRICH_CHAN_COUNT],
+                   int maxBins[][DIRICH_CHAN_COUNT][2]) {
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < LEN(projHists[0]); j++) {
             int maxBinX = maxBins[i][j][0];
             const int nBinsCut = 2;
@@ -146,83 +173,167 @@ int main(int argc, const char **argv) {
                 "", maxBinX - nBinsCut / 2, maxBinX + nBinsCut / 2);
         }
     }
-    printf(" ...done\n");
+}
 
-    printf("Fitting the histograms");
-    // Only show fatal errors
-    gErrorIgnoreLevel = kFatal;
+void fitHistograms(TH1D *projHists[][DIRICH_CHAN_COUNT],
+                   double cuts[][DIRICH_CHAN_COUNT][2],
+                   TFitResultPtr fitResults[][DIRICH_CHAN_COUNT]) {
+    gErrorIgnoreLevel = kError;  // Disable warnings temporarily
 
-    auto fitFunc = new TF1("fitFunc", "gaus");
     bool needsNewline = true;
-    TFitResultPtr fitResults[LEN(projHists)][LEN(projHists[0])];
-    for (unsigned int i = 0; i < LEN(fitResults); i++) {
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < LEN(fitResults[0]); j++) {
             double mean = cuts[i][j][1];
             auto projHist = projHists[i][j];
 
-            // Make the cut
-            const double cutWidth = 2;
+            const double cutWidth = 4;
             projHist->SetAxisRange(mean - cutWidth / 2, mean + cutWidth / 2);
-            fitFunc->SetParameter(1, mean);
-            fitFunc->SetParameter(2, 0.1);
-            fitResults[i][j] = projHist->Fit("fitFunc", "SNQ", "");
-            if (fitResults[i][j] == -1) {
+            auto fitResult = projHist->Fit("gaus", "SNQ", "");
+            if (fitResult == -1) {
                 if (needsNewline) {
                     fprintf(stderr, "\n");
                     needsNewline = false;
                 }
-                fprintf(stderr, "warning: fit failed for channel %d\n",
+                fprintf(stderr, "warning: initial fit failed for channel %d\n",
+                        dirichStartChans[i] + j);
+                continue;
+            }
+
+            // Avoiding fit mean guess because it is skewed rightwards
+            double amp1 = fitResult->Parameter(0);
+            double sigma1 = fitResult->Parameter(2);
+            auto fitFunc =
+                new TF1("fitFunc", "gaus + gaus(3) + gaus(6)", 0, 100);
+            fitFunc->SetParameter(0, amp1);
+            fitFunc->SetParameter(1, mean);
+            fitFunc->SetParameter(2, sigma1);
+            fitFunc->SetParameter(3, amp1 / 4);
+            fitFunc->SetParameter(4, mean + sigma1);
+            fitFunc->SetParameter(5, sigma1);
+            fitFunc->SetParameter(6, amp1 / 8);
+            fitFunc->SetParameter(7, mean + 3 * sigma1);
+            fitFunc->SetParameter(8, sigma1);
+            fitResult = projHist->Fit("fitFunc", "SNQ", "");
+            if (fitResult == -1) {
+                if (needsNewline) {
+                    fprintf(stderr, "\n");
+                    needsNewline = false;
+                }
+                fprintf(stderr, "warning: final fit failed for channel %d\n",
                         dirichStartChans[i] + j);
             }
+            fitResults[i][j] = fitResult;
         }
     }
 
-    // Show warning messages
-    gErrorIgnoreLevel = kWarning;
+    gErrorIgnoreLevel = kWarning;  // Show warning messages
+}
+
+void printUsage() {
+    printf(
+        "This program takes in the PMT data from the DiRICH boards as a ROOT "
+        "file. It then makes cut on the (fLeadingEdge - fLeadingEdge[trigger]) "
+        "vs fTot banana. The resulting 1D histogram is then fit using three "
+        "Gaussians.\n"
+        "The fit results are saved in two forms - a ROOT file and a TSV "
+        "file.\n\n"
+        "Usage:\n"
+        "\t" BINARY
+        " -i <input ROOT file> -t <trigger channel> -d <dirich start "
+        "channels>\n\n"
+        "For example, the command below reads data from data.A.root and runs "
+        "the fit routine for channels 1000-1032 and 1040-1072 with trigger "
+        "being at channel 990. The final results are saved as data.tsv and "
+        "data.D.root.\n"
+        "\t" BINARY " -i data.A.root -t 990 -d 1000 1040\n\n");
+}
+
+int main(int argc, char **argv) {
+    // Parse CLI arguments
+    string inputFilename;
+    po::options_description desc("Allowed options");
+    desc.add_options()("help,h", "Display help message")(
+        "input-file,i", po::value(&inputFilename)->required(),
+        "Input ROOT file")("trigger-channel,t",
+                           po::value(&triggerChan)->required(),
+                           "Channel number of the trigger")(
+        "dirich-start-channels,d",
+        po::value<std::vector<std::string>>()->multitoken()->required(),
+        "Starting channels of each DiRICH board being used");
+
+    po::variables_map vm;
+    po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
+    if (argc == 1 || vm.count("help")) {
+        printUsage();
+        desc.print(std::cout);
+        return 0;
+    }
+
+    try {
+        po::notify(vm);
+    } catch (po::error &e) {
+        fprintf(stderr, "error: %s\n", e.what());
+        desc.print(std::cout);
+        return 1;
+    }
+
+    if (vm.count("dirich-start-channels")) {
+        for (auto &startChans :
+             vm["dirich-start-channels"].as<vector<string>>()) {
+            dirichStartChans.push_back(std::stoi(startChans));
+        }
+    }
+
+    // Disable buffering for STDOUT
+    setbuf(stdout, NULL);
+
+    // Disable referencing for histograms globally in favour of variables
+    // Note that all histogram classes extend TH1
+    TH1::AddDirectory(kFALSE);
+
+    printf("Loading data");
+    auto file = new TFile(inputFilename.data());
+    if (file == NULL) {
+        printf("\nerror: could not open '%s'\n", inputFilename.data());
+        return 1;
+    }
     printf(" ...done\n");
+
+    printf("Populating the 2D histogram");
+    TH2D *hists[dirichStartChans.size()][DIRICH_CHAN_COUNT];
+    fill2DHistograms(file, hists);
+    printf(" ...done\n");
+
+    printf("Finding the cuts");
+    double cuts[LEN(hists)][LEN(hists[0])][2];
+    int maxBins[LEN(hists)][LEN(hists[0])][2];
+    findCuts(hists, cuts, maxBins);
+    printf(" ...done\n");
+
+    printf("Making the cuts");
+    TH1D *projHists[LEN(hists)][LEN(hists[0])];
+    cutHistograms(hists, projHists, maxBins);
+    printf(" ...done\n");
+
+    printf("Fitting the histograms");
+    TFitResultPtr fitResults[LEN(projHists)][LEN(projHists[0])];
+    fitHistograms(projHists, cuts, fitResults);
+    printf(" ...done\n");
+
+    string ext = ".A.root";
+    string inputStem =
+        inputFilename.substr(0, inputFilename.length() - ext.length());
 
     printf("Writing computed data to ROOT file");
     string outRootFilename = inputStem;
     outRootFilename.append(".D.root");
-
-    // const unsigned int arrSize = LEN(fitResults) * LEN(fitResults[0]);
-    // double sigma[arrSize];
-    auto outRootFile = new TFile(TString(outRootFilename), "RECREATE");
-    // auto dataTree = new TTree("D", "Computed data");
-    // dataTree->Branch("sigma", sigma, "sigma[64]/D");
-    // dataTree->Branch("rms", rms, "rms[64]/D");
-
-    // // Fill sigmas
-    // for (unsigned int i = 0; i < LEN(fitResults); i++) {
-    //     for (unsigned int j = 0; j < LEN(fitResults[0]); j++) {
-    //         auto fitResult = fitResults[i][j];
-    //         unsigned int index = LEN(fitResults[0]) * i + j;
-    //         if (fitResult == -1) {
-    //             continue;
-    //         }
-    //
-    //         sigma[index] = fitResult->Parameter(2) * 1e3;
-    //     }
-    // }
-    //
-    //
-    auto projHistList = new TList();
-    for (unsigned int i = 0; i < LEN(hists); i++) {
-        for (unsigned int j = 0; j < LEN(hists[0]); j++) {
-            projHistList->Add(projHists[i][j]);
-        }
-    }
-
-    // dataTree->Fill();
-    // dataTree->Write("D");
-    projHistList->Write("histList", TObject::kSingleKey);
-    outRootFile->Close();
+    writeToRootFile(fitResults, outRootFilename);
     printf(" ...done\n");
 
     printf("Writing fit data to TSV file");
-    string outDataFilename = inputStem;
-    outDataFilename.append(".tsv");
-    writeToFile(outDataFilename, fitResults, cuts);
+    string outTSVFilename = inputStem;
+    outTSVFilename.append(".tsv");
+    writeToTSVFile(fitResults, cuts, outTSVFilename);
     printf(" ...done\n");
 
     file->Close();

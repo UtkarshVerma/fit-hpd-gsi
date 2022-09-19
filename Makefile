@@ -1,10 +1,11 @@
 .POSIX:
 
-CXX = g++
-CXXFLAGS = -O3 -g -Wall -pedantic $(shell root-config --cflags) -std=c++17
-LDFLAGS = -L$(shell root-config --libdir)
-LDLIBS = $(shell root-config --libs --noldflags)
 BIN = fit
+
+CXX = g++
+CXXFLAGS = -std=c++17 -O3 -g -Wall -pedantic -DBINARY=\"$(BIN)\" $(shell root-config --cflags)
+LDFLAGS = -L$(shell root-config --libdir)
+LDLIBS = $(shell root-config --libs --noldflags) -lboost_program_options
 
 $(BIN): main.o
 	$(CXX) $(LDFLAGS) $^ -o $@ $(LDLIBS)
