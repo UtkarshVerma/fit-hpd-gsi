@@ -9,6 +9,7 @@
 #include <TROOT.h>
 #include <TString.h>
 #include <TTree.h>
+#include <strings.h>
 
 #include <boost/program_options.hpp>
 #include <boost/program_options/options_description.hpp>
@@ -17,8 +18,9 @@
 #include <boost/program_options/value_semantic.hpp>
 #include <boost/program_options/variables_map.hpp>
 #include <boost/range/detail/implementation_help.hpp>
-#include <complex>
+#include <cmath>
 #include <cstdio>
+#include <utility>
 
 using std::string;
 using std::vector;
@@ -31,7 +33,8 @@ vector<unsigned int> dirichStartChans;
 unsigned int triggerChan;
 
 void writeToTSVFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
-                    double cuts[][DIRICH_CHAN_COUNT][2], string filename) {
+                    double cuts[][DIRICH_CHAN_COUNT][2], double rms[],
+                    string filename) {
     FILE *file = fopen(filename.data(), "w");
     if (file == NULL) {
         fprintf(stderr, "\nerror: could not open file '%s'\n", filename.data());
@@ -39,9 +42,10 @@ void writeToTSVFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
 
     fprintf(file,
             "Channel\tToT Cut[ns]\t"
-            "Mean1[ns]\tSigma1[ps]\tSigmaErr1[ps]\t"
-            "Mean2[ns]\tSigma2[ps]\tSigmaErr2[ps]\t"
-            "Mean3[ns]\tSigma3[ps]\tSigmaErr3[ps]\n");
+            "Amplitude1\tMean1[ns]\tSigma1[ps]\tSigmaErr1[ps]\t"
+            "Amplitude2\tMean2[ns]\tSigma2[ps]\tSigmaErr2[ps]\t"
+            "Amplitude3\tMean3[ns]\tSigma3[ps]\tSigmaErr3[ps]\t"
+            "RMS[ps]\n");
 
     for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < DIRICH_CHAN_COUNT; j++) {
@@ -49,12 +53,14 @@ void writeToTSVFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
             auto r = fitResults[i][j];
             if (r == -1) continue;
 
-            fprintf(file, "%d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n", chan,
-                    cuts[i][j][0], r->Parameter(1), r->Parameter(2) * 1e3,
-                    r->ParError(2) * 1e3, r->Parameter(4),
-                    r->Parameter(5) * 1e3, r->ParError(5) * 1e3,
-                    r->Parameter(7), r->Parameter(8) * 1e3,
-                    r->ParError(8) * 1e3);
+            fprintf(
+                file,
+                "%d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
+                chan, cuts[i][j][0], r->Parameter(0), r->Parameter(1),
+                r->Parameter(2) * 1e3, r->ParError(2) * 1e3, r->Parameter(3),
+                r->Parameter(4), r->Parameter(5) * 1e3, r->ParError(5) * 1e3,
+                r->Parameter(6), r->Parameter(7), r->Parameter(8) * 1e3,
+                r->ParError(8) * 1e3, rms[i * DIRICH_CHAN_COUNT + j]);
         }
     }
 
@@ -62,18 +68,21 @@ void writeToTSVFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
 }
 
 void writeToRootFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
-                     string outFile) {
-    const unsigned int arrSize = dirichStartChans.size() * LEN(fitResults[0]);
-    double sigmaErrs[3][arrSize], sigmas[3][arrSize], means[3][arrSize];
+                     double rms[], string outFile) {
+    const unsigned int arrSize = dirichStartChans.size() * DIRICH_CHAN_COUNT;
+    double amplitudes[3][arrSize], means[3][arrSize], sigmas[3][arrSize];
 
     auto outRootFile = new TFile(TString(outFile), "RECREATE");
     auto dataTree = new TTree("D", "Computed data");
-    dataTree->Branch("sigmas", sigmas,
-                     TString::Format("sigmas[3][%d]/D", arrSize));
+    dataTree->Branch("amplitudes", amplitudes,
+                     TString::Format("amplitudes[3][%d]/D", arrSize));
     dataTree->Branch("means", means,
                      TString::Format("means[3][%d]/D", arrSize));
+    dataTree->Branch("sigmas", sigmas,
+                     TString::Format("sigmas[3][%d]/D", arrSize));
+    dataTree->Branch("rms", rms, TString::Format("rms[%d]/D", arrSize));
 
-    // Fill sigmas
+    // Fill data
     for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < LEN(fitResults[0]); j++) {
             auto fitResult = fitResults[i][j];
@@ -81,23 +90,28 @@ void writeToRootFile(TFitResultPtr fitResults[][DIRICH_CHAN_COUNT],
             if (fitResult == -1) continue;
 
             for (unsigned int j = 0; j < 3; j++) {
+                amplitudes[j][index] = fitResult->Parameter(3 * j + 0);
                 means[j][index] = fitResult->Parameter(3 * j + 1);
                 sigmas[j][index] = fitResult->Parameter(3 * j + 2) * 1e3;
-                sigmaErrs[j][index] = fitResult->ParError(3 * j + 2) * 1e3;
             }
         }
     }
 
-    // auto projHistList = new TList();
-    // for (unsigned int i = 0; i < LEN(hists); i++) {
-    //     for (unsigned int j = 0; j < LEN(hists[0]); j++) {
-    //         projHistList->Add(projHists[i][j]);
-    //     }
-    // }
-
     dataTree->Fill();
     dataTree->Write("D");
-    // projHistList->Write("histList", TObject::kSingleKey);
+    outRootFile->Close();
+}
+
+void writeHistsToRootFile(TH1D *projHists[][DIRICH_CHAN_COUNT],
+                          string outFile) {
+    auto outRootFile = new TFile(TString(outFile), "RECREATE");
+    auto projHistList = new TList();
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
+        for (unsigned int j = 0; j < DIRICH_CHAN_COUNT; j++) {
+            projHistList->Add(projHists[i][j]);
+        }
+    }
+    projHistList->Write("H", TObject::kSingleKey);
     outRootFile->Close();
 }
 
@@ -188,7 +202,8 @@ void fitHistograms(TH1D *projHists[][DIRICH_CHAN_COUNT],
 
             const double cutWidth = 4;
             projHist->SetAxisRange(mean - cutWidth / 2, mean + cutWidth / 2);
-            auto fitResult = projHist->Fit("gaus", "SNQ", "");
+            auto fitResult = projHist->Fit(
+                "gaus", "SNQ", "", mean - cutWidth / 2, mean + cutWidth / 2);
             if (fitResult == -1) {
                 if (needsNewline) {
                     fprintf(stderr, "\n");
@@ -200,20 +215,20 @@ void fitHistograms(TH1D *projHists[][DIRICH_CHAN_COUNT],
             }
 
             // Avoiding fit mean guess because it is skewed rightwards
-            double amp1 = fitResult->Parameter(0);
-            double sigma1 = fitResult->Parameter(2);
-            auto fitFunc =
-                new TF1("fitFunc", "gaus + gaus(3) + gaus(6)", 0, 100);
-            fitFunc->SetParameter(0, amp1);
+            double amp0 = fitResult->Parameter(0);
+            double sigma0 = fitResult->Parameter(2);
+            auto fitFunc = new TF1("fitFunc", "gaus + gaus(3) + gaus(6)");
+            fitFunc->SetParameter(0, amp0);
             fitFunc->SetParameter(1, mean);
-            fitFunc->SetParameter(2, sigma1);
-            fitFunc->SetParameter(3, amp1 / 4);
-            fitFunc->SetParameter(4, mean + sigma1);
-            fitFunc->SetParameter(5, sigma1);
-            fitFunc->SetParameter(6, amp1 / 8);
-            fitFunc->SetParameter(7, mean + 3 * sigma1);
-            fitFunc->SetParameter(8, sigma1);
-            fitResult = projHist->Fit("fitFunc", "SNQ", "");
+            fitFunc->SetParameter(2, 0.75 * sigma0);
+            fitFunc->SetParameter(3, amp0 / 5);
+            fitFunc->SetParameter(4, mean + 2 * sigma0);
+            fitFunc->SetParameter(5, 1.35 * sigma0);
+            fitFunc->SetParameter(6, amp0 / 14);
+            fitFunc->SetParameter(7, mean + 6 * sigma0);
+            fitFunc->SetParameter(8, 2.7 * sigma0);
+            fitResult = projHist->Fit("fitFunc", "SNQ", "", mean - 3 * sigma0,
+                                      mean + 15 * sigma0);
             if (fitResult == -1) {
                 if (needsNewline) {
                     fprintf(stderr, "\n");
@@ -229,6 +244,24 @@ void fitHistograms(TH1D *projHists[][DIRICH_CHAN_COUNT],
     gErrorIgnoreLevel = kWarning;  // Show warning messages
 }
 
+void computeRMS(TH1D *projHists[][DIRICH_CHAN_COUNT],
+                TFitResultPtr fitResults[][DIRICH_CHAN_COUNT], double rms[]) {
+    for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
+        for (unsigned int j = 0; j < LEN(projHists[0]); j++) {
+            auto hist = projHists[i][j];
+            auto fitResult = fitResults[i][j];
+            auto mean1 = fitResult->Parameter(1);
+            auto sigma1 = fitResult->Parameter(2);
+            auto mean3 = fitResult->Parameter(7);
+            auto sigma3 = fitResult->Parameter(8);
+
+            // Compute RMS for the interval [mean1 - 3sigma1, mean3 + 3sigma3]
+            hist->SetAxisRange(mean1 - 3 * sigma1, mean3 + 3 * sigma3);
+            rms[i * LEN(projHists[0]) + j] = hist->GetRMS() * 1e3;
+        }
+    }
+}
+
 void printUsage() {
     printf(
         "This program takes in the PMT data from the DiRICH boards as a ROOT "
@@ -242,7 +275,7 @@ void printUsage() {
         " -i <input ROOT file> -t <trigger channel> -d <dirich start "
         "channels>\n\n"
         "For example, the command below reads data from data.A.root and runs "
-        "the fit routine for channels 1000-1032 and 1040-1072 with trigger "
+        "the fit routine for channels 1000-1031 and 1040-1071 with trigger "
         "being at channel 990. The final results are saved as data.tsv and "
         "data.D.root.\n"
         "\t" BINARY " -i data.A.root -t 990 -d 1000 1040\n\n");
@@ -277,11 +310,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (vm.count("dirich-start-channels")) {
-        for (auto &startChans :
-             vm["dirich-start-channels"].as<vector<string>>()) {
-            dirichStartChans.push_back(std::stoi(startChans));
+    // Populate `dirichStartChans`
+    for (auto &startChans : vm["dirich-start-channels"].as<vector<string>>()) {
+        int startChan = std::stoi(startChans);
+        if (startChan < 0) {
+            fprintf(stderr,
+                    "error: dirich-start-channels should be positive\n");
+            return 1;
         }
+        dirichStartChans.push_back(startChan);
     }
 
     // Disable buffering for STDOUT
@@ -320,6 +357,11 @@ int main(int argc, char **argv) {
     fitHistograms(projHists, cuts, fitResults);
     printf(" ...done\n");
 
+    printf("Computing RMS");
+    double rms[LEN(hists) * LEN(hists[0])];
+    computeRMS(projHists, fitResults, rms);
+    printf(" ...done\n");
+
     string ext = ".A.root";
     string inputStem =
         inputFilename.substr(0, inputFilename.length() - ext.length());
@@ -327,13 +369,19 @@ int main(int argc, char **argv) {
     printf("Writing computed data to ROOT file");
     string outRootFilename = inputStem;
     outRootFilename.append(".D.root");
-    writeToRootFile(fitResults, outRootFilename);
+    writeToRootFile(fitResults, rms, outRootFilename);
+    printf(" ...done\n");
+
+    printf("Writing projected histograms to ROOT file");
+    outRootFilename = inputStem;
+    outRootFilename.append(".H.root");
+    writeHistsToRootFile(projHists, outRootFilename);
     printf(" ...done\n");
 
     printf("Writing fit data to TSV file");
     string outTSVFilename = inputStem;
     outTSVFilename.append(".tsv");
-    writeToTSVFile(fitResults, cuts, outTSVFilename);
+    writeToTSVFile(fitResults, cuts, rms, outTSVFilename);
     printf(" ...done\n");
 
     file->Close();
