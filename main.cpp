@@ -9,18 +9,13 @@
 #include <TROOT.h>
 #include <TString.h>
 #include <TTree.h>
-#include <strings.h>
 
 #include <boost/program_options.hpp>
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/parsers.hpp>
-#include <boost/program_options/positional_options.hpp>
-#include <boost/program_options/value_semantic.hpp>
 #include <boost/program_options/variables_map.hpp>
-#include <boost/range/detail/implementation_help.hpp>
 #include <cmath>
 #include <cstdio>
-#include <utility>
 
 using std::string;
 using std::vector;
@@ -118,7 +113,7 @@ void writeHistsToRootFile(TH1D *projHists[][DIRICH_CHAN_COUNT],
 void fill2DHistograms(TFile *file, TH2D *hists[][DIRICH_CHAN_COUNT]) {
     for (unsigned int i = 0; i < dirichStartChans.size(); i++) {
         for (unsigned int j = 0; j < LEN(hists[0]); j++) {
-            hists[i][j] = new TH2D("", "", 2000, 20, 50, 2000, 20, 60);
+            hists[i][j] = new TH2D("", "", 2000, 20, 50, 2000, 40, 80);
         }
     }
 
@@ -250,6 +245,12 @@ void computeRMS(TH1D *projHists[][DIRICH_CHAN_COUNT],
         for (unsigned int j = 0; j < LEN(projHists[0]); j++) {
             auto hist = projHists[i][j];
             auto fitResult = fitResults[i][j];
+            auto index = i * LEN(projHists[0]) + j;
+            if (fitResult == -1) {
+                rms[index] = -1;
+                continue;
+            }
+
             auto mean1 = fitResult->Parameter(1);
             auto sigma1 = fitResult->Parameter(2);
             auto mean3 = fitResult->Parameter(7);
@@ -257,7 +258,7 @@ void computeRMS(TH1D *projHists[][DIRICH_CHAN_COUNT],
 
             // Compute RMS for the interval [mean1 - 3sigma1, mean3 + 3sigma3]
             hist->SetAxisRange(mean1 - 3 * sigma1, mean3 + 3 * sigma3);
-            rms[i * LEN(projHists[0]) + j] = hist->GetRMS() * 1e3;
+            rms[index] = hist->GetRMS() * 1e3;
         }
     }
 }
